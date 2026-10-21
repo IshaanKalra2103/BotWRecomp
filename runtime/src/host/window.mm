@@ -17,6 +17,7 @@
 #include "../log.h"
 #include "../os.h"
 #include "../latte/latte.h"
+#include "lifecycle.h"
 
 extern std::atomic<pthread_t> g_gpu_thread;  // cemu_shims/overlay_menu.cpp: Cemu's GPU thread
 #include "menu.h"
@@ -185,6 +186,7 @@ void apply_input() {
     s.ly = std::clamp(s.ly, -1.f, 1.f);
     s.rx = std::clamp(s.rx, -1.f, 1.f);
     s.ry = std::clamp(s.ry, -1.f, 1.f);
+    if (!lifecycle::active()) s = input::PadState{};
     input::set_gamepad(s);
 }
 }  // namespace
@@ -287,9 +289,10 @@ void run() {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) g_quit = true;
-            else if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND || e.type == SDL_EVENT_WILL_ENTER_FOREGROUND) {
-                g_background = e.type == SDL_EVENT_DID_ENTER_BACKGROUND;
-                LOG("app %s", g_background ? "entered the background" : "returning to the foreground");
+            else if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND || e.type == SDL_EVENT_DID_ENTER_BACKGROUND ||
+                     e.type == SDL_EVENT_WILL_ENTER_FOREGROUND || e.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+                LOG("SDL lifecycle: event=%u active=%d generation=%llu", e.type, lifecycle::active(),
+                    (unsigned long long)lifecycle::generation());
             } else if (e.type == SDL_EVENT_TERMINATING) LOG("app terminating");
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED && !g_pad) {
                 g_pad = SDL_OpenGamepad(e.gdevice.which);
@@ -362,6 +365,7 @@ void run() {
                 SDL_SetWindowFullscreen(g_win, !fs);
             }
         }
+        g_background = !lifecycle::active();
         apply_input();
         // Freeze watchdog: no game frame for 8 s while in the foreground -> log every thread (once a minute)
         {

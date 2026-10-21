@@ -10,4 +10,7 @@ void init();  // safe to call more than once
 void push_tv(const int16_t* interleaved, int frames, int channels);
 int queued_frames();  // frames waiting in the host device queue (for pacing)
 void set_volume(float v);  // 0..1
+void set_app_active(bool active);
+void set_interrupted(bool interrupted); // AVAudioSession / output route interruptions
+void route_changed(); // reset stale audio without clearing a still-active interruption
 }  // namespace audio

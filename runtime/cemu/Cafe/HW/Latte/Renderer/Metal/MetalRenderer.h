@@ -1,6 +1,7 @@
 #pragma once
 
 #include <TargetConditionals.h>
+#include <cstdint>
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 
 #include "Cafe/HW/Latte/Renderer/Metal/MetalLayerHandle.h"
@@ -486,7 +487,7 @@ private:
 	bool m_hasUnifiedMemory;
 	bool m_supportsMetal3;
 	bool m_supportsMeshShaders;
-	uint32 m_recommendedMaxVRAMUsage;
+	uint64 m_recommendedMaxVRAMUsage;
 	MetalPixelFormatSupport m_pixelFormatSupport;
 
 	// Managers and caches
@@ -506,6 +507,12 @@ private:
 	// Synchronization resources
 	MTL::Event* m_event;
 	int32_t m_eventValue = -1;
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    MTL::CommandBuffer* m_lastSubmitted = nullptr; // separate retain, protected by lifecycle submission lock
+    uint64 m_submittedCount = 0, m_completedCount = 0, m_errorCount = 0;
+    double m_lastGpuMilliseconds = 0;
+    int64_t m_lastDiagnosticsMs = 0;
+#endif
 
 	// Resources
 	MTL::SamplerState* m_nearestSampler;

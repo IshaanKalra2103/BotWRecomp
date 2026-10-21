@@ -25,14 +25,14 @@ std::atomic<int> g_draws{0};
 }  // namespace
 
 // Cemu's GPU thread (LatteThread), for the host loop's slow-frame sampler (window.mm).
-std::atomic<pthread_t> g_gpu_thread{nullptr};
+std::atomic<pthread_t> g_gpu_thread{};
 
 void LatteOverlay_updateStats(double fps, sint32 drawcalls, sint32 fastDrawcalls) {
     g_gpu_thread = pthread_self();  // stats are updated on the GPU thread
     g_fps = (float)fps;
     g_draws = drawcalls;
     static int n = 0;
-    if (fps > 0 && (n++ % 5) == 0)
+    if (fps > 0 && (n++ % 2) == 0)
         log_write("[gpu] %.1f fps, %d draws/frame (%d fast); main thread waits: %s", fps, drawcalls, fastDrawcalls,
                   threads::main_wait_report().c_str());
 }
@@ -52,11 +52,15 @@ void LatteOverlay_render(bool padView) {
     const ImGuiWindowFlags overlay = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
-    if (settings::get().show_fps) {
+    const bool menu_open = menu::is_open();
+    const bool show_fps = settings::get().show_fps;
+    // Both overlays use the same snapshot; retain its vector storage on the GPU thread.
+    static touch::DrawState ts;
+    if (!menu_open || show_fps) touch::draw_state(ts);
+    if (show_fps) {
         float sl, st, sr, sb;  // top-right, inside the safe area with some padding
         menu::safe_area(&sl, &st, &sr, &sb);
         ImVec2 pos{io.DisplaySize.x - sr - 16 * ui, st + 12 * ui}, pivot{1.0f, 0.0f};
-        const touch::DrawState ts = touch::draw_state();
         if (ts.visible && !ts.collapsed && ts.w > 0)  // on-screen ZR is up there: centered under the top button row
             for (const touch::DrawItem& it : ts.items)
                 if (it.shape == touch::DrawItem::kMenu) {
@@ -72,8 +76,11 @@ void LatteOverlay_render(bool padView) {
         ImGui::End();
     }
 
+    if (!menu_open) {
+        touch::draw(ts);
+        return;
+    }
     menu::View v = menu::view();
-    if (!v.open) touch::draw();
     if (!v.open) return;
     ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
     ImGui::SetNextWindowBgAlpha(0.88f);

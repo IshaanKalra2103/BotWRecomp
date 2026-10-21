@@ -79,8 +79,7 @@ void text(ImDrawList* dl, const char* s, ImVec2 c, float h, ImU32 col, float th)
 }  // namespace
 
 namespace touch {
-void draw() {
-    const DrawState st = draw_state();
+void draw(const DrawState& st) {
     if (!st.visible || st.w <= 0) return;
     ImGuiIO& io = ImGui::GetIO();
     const float k = io.DisplaySize.x / st.w;  // layout space -> ImGui pixels (normally 1)

@@ -34,6 +34,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../log.h"
@@ -462,6 +463,11 @@ void test_tick() {
 }  // namespace
 
 void set_mode(int mode) { g_mode = mode; }
+void cancel_all() {
+    std::lock_guard guard(g_lock);
+    release_all();
+    g.out = input::PadState{};
+}
 void set_controller_connected(bool c) { g_controller = c; }
 void set_hidden(bool h) { g_hidden = h; }
 bool active() { return g_mode == 1 || (g_mode == 0 && !g_controller); }
@@ -561,11 +567,15 @@ void apply(input::PadState& s) {
     s.ry += t.ry;
 }
 
-DrawState draw_state() {
+void draw_state(DrawState& d) {
     std::lock_guard<std::mutex> l(g_lock);
-    DrawState d;
+    // Reset transient fields without discarding the caller's vector capacity.
+    DrawState fresh;
+    fresh.items.swap(d.items);
+    fresh.items.clear();
+    d = std::move(fresh);
     d.visible = g.visible && g.w > 0;
-    if (!d.visible) return d;
+    if (!d.visible) return;
     d.w = g.w, d.h = g.h, d.u = g.u;
     d.items.reserve(g.ctrls.size());
     for (auto& c : g.ctrls) d.items.push_back(c.d);
@@ -578,13 +588,12 @@ DrawState draw_state() {
         for (size_t i = 0; i < g.ctrls.size(); i++)
             if (g.ctrls[i].toggle) d.items = {d.items[i]};
         d.collapsed = true;
-        return d;
+        return;
     }
     d.home_x = g.home_x, d.home_y = g.home_y, d.stick_r = g.stick_r;
     d.stick = g.stick;
     d.base_x = g.bx, d.base_y = g.by, d.knob_x = g.kx, d.knob_y = g.ky;
     if (g.look)
         if (const Finger* f = find(g.look_id)) d.look = true, d.look_x = f->x, d.look_y = f->y;
-    return d;
 }
 }  // namespace touch

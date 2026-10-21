@@ -132,6 +132,8 @@ void click(int row, int dir) {
 View view() {
     View v;
     v.open = g_open;
+    // The overlay asks every frame; closed menus need no rows, formatting or settings lock.
+    if (!v.open) return v;
     {
         std::lock_guard<std::mutex> l(g_lock);
         v.cursor = g_cursor;

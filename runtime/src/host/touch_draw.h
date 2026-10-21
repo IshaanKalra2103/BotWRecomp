@@ -29,5 +29,6 @@ struct DrawState {
     bool look = false;
     float look_x = 0, look_y = 0;
 };
-DrawState draw_state();  // any thread
+// Fill a caller-owned snapshot, reusing its item storage between frames (any thread).
+void draw_state(DrawState& state);
 }  // namespace touch

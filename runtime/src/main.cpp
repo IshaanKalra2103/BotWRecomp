@@ -39,13 +39,11 @@ void debug_watch_init();
 
 static void on_fault(int sig, siginfo_t* si, void* uctx) {
     if (debug_watch_fault(si->si_addr, uctx)) return;
-    uintptr_t a = (uintptr_t)si->si_addr, base = (uintptr_t)g_mem;
-    if (a >= base && a < base + (1ull << 32) + 0x10000)
-        LOG("FATAL: signal %d: guest memory access at %08x", sig, (uint32_t)(a - base));
-    else
-        LOG("FATAL: signal %d: host access at %p", sig, (void*)a);
-    threads::GuestThread* t = threads::current();
-    rt_trap(t ? &t->ctx : nullptr, 0, "signal (ctx registers may be stale)");
+    log_emergency(sig, (uintptr_t)si->si_addr);
+    // Preserve the native crash report. Do not acquire logger/thread locks or
+    // terminate with _exit(), which hides the crash from iOS diagnostics.
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 int main(int argc, char** argv) {
@@ -54,8 +52,24 @@ int main(int argc, char** argv) {
     else g_user_root = std::string(getenv("HOME")) + "/Library/Application Support/BotWRecomp";
     mkdir(g_user_root.c_str(), 0755);
     log_set_file((g_user_root + "/runtime.log").c_str());
+#ifdef BOTW_BUILD_REV
+    LOG("build: version 0.2 (2), revision %s, diagnostics v2", BOTW_BUILD_REV);
+#endif
+#if TARGET_OS_IOS
+    extern void botw_ios_install_diagnostics();
+    botw_ios_install_diagnostics();
+#endif
     settings::load(g_user_root + "/settings.ini");  // in-game menu settings; the flags below override them
     Settings opt = settings::get();
+    if (getenv("BOTW_PHONE_PROFILE")) {
+        const auto marker = g_user_root + "/iphone15pro-v2.applied";
+        if (access(marker.c_str(), F_OK) != 0) {
+            opt.fps = 30; opt.scale = 0.75f; opt.filter = 0; opt.show_fps = true;
+            settings::set(opt);
+            if (FILE* f = fopen(marker.c_str(), "w")) { fputs("30 fps, 960x540, bilinear; editable from the in-game menu\n", f); fclose(f); }
+            LOG("profile: iPhone 15 Pro v2 applied once: 30 fps, 960x540, bilinear");
+        }
+    }
 
     int capture_every = 0;
     for (int i = 1; i < argc; i++) {
@@ -79,6 +93,8 @@ int main(int argc, char** argv) {
     }
     settings::set(opt, false);  // this run only; the menu saves its changes
     g_render_scale = opt.scale;
+    LOG("settings: effective fps=%d scale=%.3f display=%d filter=%d volume=%d gyro=%d", opt.fps, opt.scale,
+        opt.display, opt.filter, opt.volume, opt.gyro);
     if (g_game_root.empty()) {
         if (const char* e = getenv("BOTW_GAME")) g_game_root = e;
     }
@@ -93,8 +109,9 @@ int main(int argc, char** argv) {
     sigaction(SIGBUS, &sa, nullptr);
     sigaction(SIGILL, &sa, nullptr);
     signal(SIGABRT, [](int) {
-        LOG("FATAL: abort()");
-        _exit(6);
+        log_emergency(SIGABRT, 0);
+        signal(SIGABRT, SIG_DFL);
+        raise(SIGABRT);
     });
 
     mem::init();
@@ -115,5 +132,6 @@ int main(int argc, char** argv) {
     uint32_t argv_g = os::build_argv("U-King.rpx");
     threads::start_main(loader::main_module().entry, 1, argv_g, loader::main_module().stack_size);
     os::host_main_loop();  // returns when the game exits or the time limit is reached
+    LOG("session: normal main loop exit");
     return 0;
 }
