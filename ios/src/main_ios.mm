@@ -13,8 +13,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstring>
 
 #include "log.h"
+#include "host/lifecycle.h"
 
 int botw_main(int argc, char** argv);
 
@@ -26,7 +28,9 @@ NSString* const kReadme =
      "    Documents/game/code/U-King.rpx\n"
      "    Documents/game/content/...\n"
      "    Documents/game/meta/...\n\n"
-     "Saves, shader caches and runtime.log live in the app's Library/Application Support/BotWRecomp.\n";
+     "Saves and shader caches live in Library/Application Support/BotWRecomp.\n"
+     "Diagnostic logs are also available in Documents/Diagnostics: runtime.log is the current session; "
+     "runtime.log.1 through .4 preserve previous sessions. Export the entire Diagnostics folder after a problem.\n";
 
 bool has_rpx(NSString* dir) {
     return [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:@"code/U-King.rpx"]];
@@ -50,16 +54,22 @@ uint64_t footprint_bytes() {
     return vm.phys_footprint;
 }
 
-// Memory/jetsam headroom in runtime.log every 10 s (the numbers the port has to live within).
+// Sample memory and thermal pressure every 2 seconds, including while rendering stalls.
 void start_stats_thread(std::string device) {
     std::thread([device] {
         bool first = true;
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::seconds(first ? 2 : 10));
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            @autoreleasepool {
             if (first) LOG("%s", device.c_str());  // the log file is open by now
             first = false;
-            LOG("ios: footprint %llu MB, available before jetsam %llu MB",
-                (unsigned long long)(footprint_bytes() >> 20), (unsigned long long)(os_proc_available_memory() >> 20));
+            auto available = os_proc_available_memory();
+            LOG("ios: footprint %llu MiB, available before jetsam %llu MiB, thermal=%ld low_power=%d active=%d lifecycle=%llu%s",
+                (unsigned long long)(footprint_bytes() >> 20), (unsigned long long)(available >> 20),
+                (long)NSProcessInfo.processInfo.thermalState, (int)NSProcessInfo.processInfo.lowPowerModeEnabled,
+                lifecycle::active(), (unsigned long long)lifecycle::generation(),
+                available < (256ull << 20) ? " LOW MEMORY HEADROOM" : "");
+            }
         }
     }).detach();
 }
@@ -76,6 +86,11 @@ int ios_main(int argc, char** argv) {
     // runtime/src/main.cpp creates $HOME/Library/Application Support/BotWRecomp with a plain mkdir
     [fm createDirectoryAtPath:[support stringByAppendingPathComponent:@"BotWRecomp"]
         withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString* diagnostics = [docs stringByAppendingPathComponent:@"Diagnostics"];
+    if ([fm createDirectoryAtPath:diagnostics withIntermediateDirectories:YES attributes:nil error:nil]) {
+        setenv("BOTW_LOG_EXPORT_DIR", diagnostics.fileSystemRepresentation, 1);
+        [[NSURL fileURLWithPath:diagnostics] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    }
     [kReadme writeToFile:[docs stringByAppendingPathComponent:@"README.txt"] atomically:YES
                 encoding:NSUTF8StringEncoding error:nil];
 
@@ -112,6 +127,8 @@ int ios_main(int argc, char** argv) {
     char model[64] = {};
     len = sizeof model;
     sysctlbyname("hw.machine", model, &len, nullptr, 0);
+    if (!strcmp(model, "iPhone16,1") || !strcmp(model, "iPhone16,2"))
+        setenv("BOTW_PHONE_PROFILE", "iphone15pro-v2", 1);
     char device[256];
     snprintf(device, sizeof device, "ios: %s, iOS %s, RAM %llu MB, available before jetsam at launch %llu MB", model,
              UIDevice.currentDevice.systemVersion.UTF8String, (unsigned long long)(memsize >> 20),

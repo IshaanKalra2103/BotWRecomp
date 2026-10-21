@@ -10,6 +10,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include "../host/lifecycle.h"
+#include "../audio/output.h"
 
 #include "ax.h"
 #include "ax_internal.h"
@@ -843,6 +845,10 @@ namespace snd_core
 
 		void AXIst_ThreadEntry()
 		{
+			// Unlike run_thread(), this adopted host thread never received QoS.
+			// Keep the 3 ms mixer deadline ahead of background shader/asset workers.
+			int qosResult = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+			LOG("snd_core: AX thread interactive QoS result=%d", qosResult);
 			threads::adopt_host_thread("AX", kIstGuestStackSize, 1);
 
 			using clock = std::chrono::steady_clock;
@@ -856,9 +862,18 @@ namespace snd_core
 
 			auto nextFrame = clock::now();
 			auto lastFrame = nextFrame - kWaitDuration;
+			auto lastReport = nextFrame;
+			double maxMixMs = 0, maxLateMs = 0;
+			uint64_t lateFrames = 0;
 			std::unique_lock<std::mutex> lock(s_istLock);
 			while (!s_istStopRequested)
 			{
+				if (!lifecycle::active()) {
+					s_istCond.wait_for(lock, std::chrono::milliseconds(20), [] { return s_istStopRequested; });
+					nextFrame = clock::now();
+					lastFrame = nextFrame - kWaitDuration;
+					continue;
+				}
 				sint32 pacing = AXOut_GetFramePacingAdjustment();
 				nextFrame += pacing < 0 ? kWaitDurationFast : (pacing > 0 ? kWaitDurationSlow : kWaitDuration);
 				auto now = clock::now();
@@ -869,7 +884,17 @@ namespace snd_core
 					break;
 				lock.unlock();
 				lastFrame = clock::now();
+				double lateMs = std::chrono::duration<double, std::milli>(lastFrame - wakeTime).count();
+				maxLateMs = std::max(maxLateMs, lateMs);
+				if (lateMs > 3) ++lateFrames;
 				AXIst_GenerateFrame();
+				auto finished = clock::now();
+				maxMixMs = std::max(maxMixMs, std::chrono::duration<double, std::milli>(finished - lastFrame).count());
+				if (finished - lastReport >= std::chrono::seconds(2)) {
+					LOG("snd_core: max_mix=%.3f ms max_scheduler_late=%.3f ms late_frames=%llu queue=%.1f ms",
+						maxMixMs, maxLateMs, (unsigned long long)lateFrames, audio::queued_frames() / 48.0);
+					lastReport = finished; maxMixMs = maxLateMs = 0; lateFrames = 0;
+				}
 				numProcessedFrames++;
 				lock.lock();
 			}

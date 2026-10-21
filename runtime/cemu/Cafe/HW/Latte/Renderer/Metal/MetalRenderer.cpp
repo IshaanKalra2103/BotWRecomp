@@ -22,6 +22,9 @@
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "config/CemuConfig.h"
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+#include "host/lifecycle.h"
+#endif
 
 #define IMGUI_IMPL_METAL_CPP
 #include "imgui/imgui_extension.h"
@@ -277,10 +280,20 @@ MetalRenderer::MetalRenderer() : Renderer(RendererAPI::Metal)
     // HACK: for some reason, this variable ends up being initialized to some garbage data, even though its declared as bool m_captureFrame = false;
     m_occlusionQuery.m_lastCommandBuffer = nullptr;
     m_captureFrame = false;
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    lifecycle::set_gpu_drain(this, [](void* context) {
+        auto* self = static_cast<MetalRenderer*>(context);
+        if (self->m_lastSubmitted) self->m_lastSubmitted->waitUntilCompleted();
+    });
+#endif
 }
 
 MetalRenderer::~MetalRenderer()
 {
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    lifecycle::set_gpu_drain(nullptr, nullptr);
+    if (m_lastSubmitted) { m_lastSubmitted->waitUntilCompleted(); m_lastSubmitted->release(); }
+#endif
     if (m_isAppleGPU)
         delete m_copyBufferToBufferPipeline;
     //delete m_copyTextureToTexturePipeline;
@@ -356,7 +369,9 @@ bool MetalRenderer::IsPadWindowActive()
 bool MetalRenderer::GetVRAMInfo(int& usageInMB, int& totalInMB) const
 {
     // Subtract host memory from total VRAM, since it's shared with the CPU
-    usageInMB = (m_device->currentAllocatedSize() - m_memoryManager->GetHostAllocationSize()) / 1024 / 1024;
+    const auto allocated = m_device->currentAllocatedSize();
+    const auto host = m_memoryManager->GetHostAllocationSize();
+    usageInMB = (allocated > host ? allocated - host : 0) / 1024 / 1024;
     totalInMB = m_recommendedMaxVRAMUsage / 1024 / 1024;
 
     return true;
@@ -1739,11 +1754,23 @@ void MetalRenderer::SetSamplerState(MTL::RenderCommandEncoder* renderCommandEnco
 
 MTL::CommandBuffer* MetalRenderer::GetCommandBuffer()
 {
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    lifecycle::wait_until_active();
+#endif
     bool needsNewCommandBuffer = (!m_currentCommandBuffer.m_commandBuffer || m_currentCommandBuffer.m_commited);
     if (needsNewCommandBuffer)
 	{
         // Debug
         //m_commandQueue->insertDebugCaptureBoundary();
+
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+        // Bound staging allocations while the GPU is delayed. Never accumulate
+        // an unbounded queue after an iOS interruption.
+        if (m_executingCommandBuffers.size() >= 64) {
+            m_executingCommandBuffers.front()->waitUntilCompleted();
+            ProcessFinishedCommandBuffers();
+        }
+#endif
 
         auto pool = NS::AutoreleasePool::alloc()->init();
 	    MTL::CommandBuffer* mtlCommandBuffer = m_commandQueue->commandBuffer()->retain();
@@ -1751,8 +1778,10 @@ MTL::CommandBuffer* MetalRenderer::GetCommandBuffer()
 		m_currentCommandBuffer = {mtlCommandBuffer};
 
 		// Wait for the previous command buffer
+#if !(TARGET_OS_IOS && defined(BOTWRECOMP))
 		if (m_eventValue != -1)
 		    mtlCommandBuffer->encodeWait(m_event, m_eventValue);
+#endif
 
 		m_recordedDrawcalls = 0;
 		m_commitTreshold = m_defaultCommitTreshlod;
@@ -1942,15 +1971,27 @@ void MetalRenderer::CommitCommandBuffer()
         //    m_memoryManager->GetTemporaryBufferAllocator().CommandBufferFinished(commandBuffer.m_commandBuffer);
         //});
 
-        // Signal event
+        // One command queue preserves resource dependencies. On iOS do not chain
+        // GPU events: a notPermitted failure cannot signal its event and would
+        // permanently block all subsequent command buffers after Control Center.
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+        auto submission = lifecycle::lock_gpu_submission();
+        auto mtlCommandBuffer = m_currentCommandBuffer.m_commandBuffer;
+#else
         m_eventValue = (m_eventValue + 1) % EVENT_VALUE_WRAP;
         auto mtlCommandBuffer = m_currentCommandBuffer.m_commandBuffer;
         mtlCommandBuffer->encodeSignalEvent(m_event, m_eventValue);
+#endif
 
         mtlCommandBuffer->commit();
         m_currentCommandBuffer.m_commited = true;
 
         m_executingCommandBuffers.push_back(mtlCommandBuffer);
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+        if (m_lastSubmitted) m_lastSubmitted->release();
+        m_lastSubmitted = mtlCommandBuffer->retain();
+        ++m_submittedCount;
+#endif
 
         // Debug
         //m_commandQueue->insertDebugCaptureBoundary();
@@ -1965,6 +2006,20 @@ void MetalRenderer::ProcessFinishedCommandBuffers()
         auto commandBuffer = *it;
         if (CommandBufferCompleted(commandBuffer))
         {
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+            ++m_completedCount;
+            if (commandBuffer->status() == MTL::CommandBufferStatusError) {
+                ++m_errorCount;
+                auto error = commandBuffer->error();
+                cemuLog_log(LogType::Force, "metal: COMMAND BUFFER FAILED code={} domain={} description={} pending={} lifecycle={}",
+                    error ? (long)error->code() : -1L,
+                    error && error->domain() ? error->domain()->utf8String() : "unknown",
+                    error && error->localizedDescription() ? error->localizedDescription()->utf8String() : "unknown",
+                    m_executingCommandBuffers.size(), lifecycle::generation());
+            } else {
+                m_lastGpuMilliseconds = (commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime()) * 1000;
+            }
+#endif
             m_memoryManager->CleanupBuffers(commandBuffer);
             commandBuffer->release();
             it = m_executingCommandBuffers.erase(it);
@@ -1974,10 +2029,22 @@ void MetalRenderer::ProcessFinishedCommandBuffers()
             ++it;
         }
     }
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (nowMs - m_lastDiagnosticsMs >= 2000) {
+        m_lastDiagnosticsMs = nowMs;
+        cemuLog_log(LogType::Force, "metal: allocated={} MiB pending={} submitted={} retired={} errors={} last_buffer_gpu_ms={:.3f} active={} lifecycle={}",
+            m_device->currentAllocatedSize() >> 20, m_executingCommandBuffers.size(), m_submittedCount,
+            m_completedCount, m_errorCount, m_lastGpuMilliseconds, lifecycle::active(), lifecycle::generation());
+    }
+#endif
 }
 
 bool MetalRenderer::AcquireDrawable(bool mainWindow)
 {
+#if TARGET_OS_IOS && defined(BOTWRECOMP)
+    lifecycle::wait_until_active();
+#endif
     auto& layer = GetLayer(mainWindow);
     if (!layer.GetLayer())
         return false;

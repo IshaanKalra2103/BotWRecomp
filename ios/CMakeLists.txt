@@ -71,6 +71,7 @@ add_library(cemu_gpu OBJECT ${CEMU_SOURCES})
 # ios/compat first: CommonCrypto-backed <openssl/sha.h>/<openssl/evp.h>, empty <png.h>.
 # boost/glm are header-only; take them from their Homebrew kegs (no other Homebrew headers).
 target_include_directories(cemu_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/compat
+  ${ROOT}/runtime/src
   ${ROOT}/runtime/cemu_shims ${ROOT}/runtime/cemu ${ROOT}/runtime/cemu/Cafe
   ${ROOT}/runtime/cemu/dependencies/metal-cpp ${ROOT}/runtime/cemu/dependencies/imgui
   /opt/homebrew/opt/boost/include /opt/homebrew/opt/glm/include)
@@ -96,7 +97,7 @@ target_link_libraries(BotWRecomp PRIVATE z SDL3::SDL3-static fmt::fmt zstd::libz
   "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UIKit"
   "-framework CoreGraphics" "-framework ImageIO" "-framework UniformTypeIdentifiers" "-framework VideoToolbox"
   "-framework CoreMedia" "-framework CoreVideo" "-framework GameController" "-framework AVFoundation"
-  "-framework AudioToolbox")
+  "-framework AudioToolbox" "-framework AVFAudio")
 
 if(BOTW_SDK STREQUAL "iphoneos")
   # MetalFX (upscaling) exists on devices only, not in the simulator SDK
@@ -109,5 +110,9 @@ set_target_properties(BotWRecomp PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
   MACOSX_BUNDLE_GUI_IDENTIFIER ${BOTW_BUNDLE_ID}
   MACOSX_BUNDLE_BUNDLE_NAME BotWRecomp
-  MACOSX_BUNDLE_SHORT_VERSION_STRING 0.1
-  MACOSX_BUNDLE_BUNDLE_VERSION 1)
+  MACOSX_BUNDLE_SHORT_VERSION_STRING 0.2
+  MACOSX_BUNDLE_BUNDLE_VERSION 2)
+
+execute_process(COMMAND git rev-parse --short=12 HEAD WORKING_DIRECTORY ${ROOT}
+  OUTPUT_VARIABLE BOTW_BUILD_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+target_compile_definitions(BotWRecomp PRIVATE BOTW_BUILD_REV="${BOTW_BUILD_REV}")

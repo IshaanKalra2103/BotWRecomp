@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "log.h"
@@ -20,6 +21,10 @@ namespace {
 std::mutex g_lock;
 std::map<std::string, std::vector<std::string>> g_dirs;  // directory -> entry names (game folder only)
 std::atomic<int> g_logged{0};
+// The game directory is read-only during a run. Cache successful resolutions only, so missing
+// files can still appear later. Per-thread storage avoids a shared lock on repeated file opens.
+constexpr size_t kPathCacheLimit = 256;
+thread_local std::unordered_map<std::string, std::string> g_paths;
 
 const std::vector<std::string>& list_dir(const std::string& dir) {
     auto it = g_dirs.find(dir);
@@ -35,7 +40,15 @@ const std::vector<std::string>& list_dir(const std::string& dir) {
 
 std::string botw_ios_fix_case(const std::string& host) {
     const std::string& root = g_game_root;
-    if (root.empty() || host.compare(0, root.size(), root) != 0 || access(host.c_str(), F_OK) == 0) return host;
+    if (root.empty() || host.compare(0, root.size(), root) != 0 ||
+        (host.size() > root.size() && host[root.size()] != '/')) return host;
+    if (auto it = g_paths.find(host); it != g_paths.end()) return it->second;
+    auto remember = [&](const std::string& resolved) {
+        if (g_paths.size() >= kPathCacheLimit) g_paths.clear();
+        g_paths.emplace(host, resolved);
+        return resolved;
+    };
+    if (access(host.c_str(), F_OK) == 0) return remember(host);
     std::lock_guard<std::mutex> l(g_lock);
     std::string cur = root;
     size_t i = root.size();
@@ -62,5 +75,5 @@ std::string botw_ios_fix_case(const std::string& host) {
         i = j;
     }
     if (g_logged.fetch_add(1) < 32) LOG("ios: case-insensitive match %s -> %s", host.c_str(), cur.c_str());
-    return cur;
+    return remember(cur);
 }

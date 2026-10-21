@@ -1,0 +1,25 @@
+name: Host runtime regressions
+
+on:
+  pull_request:
+  push:
+    branches: [main, ios-lifecycle-audio-diagnostics]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-runtime:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Log analysis
+        run: python3 tests/test_log_analysis.py
+      - name: Menu, touch, filesystem and overlay regressions
+        run: python3 tests/run_hotpaths.py --cxx "$(xcrun --sdk macosx --find clang++)"
+      - name: Lifecycle, audio queue and rotating logger
+        run: python3 tests/run_diagnostics.py --cxx "$(xcrun --sdk macosx --find clang++)"
+      - name: Actual AX resampler
+        run: python3 tests/run_audio_resampler.py --cxx "$(xcrun --sdk macosx --find clang++)"
