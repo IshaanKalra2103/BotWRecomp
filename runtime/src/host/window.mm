@@ -41,7 +41,7 @@ std::atomic<int> g_draw_w{1280}, g_draw_h{720};
 
 // The device's own gyro + accelerometer (iPhone / iPad, through CoreMotion) drive GamePad motion while
 // no controller provides motion sensors: hold the phone like the GamePad to aim with it.
-bool g_pad_motion = false;  // the open controller reports gyro + accel
+bool g_pad_motion = false;  // the open controller has gyro + accel (whether or not gyro is on)
 SDL_Sensor* g_dev_gyro = nullptr;
 SDL_Sensor* g_dev_acc = nullptr;
 
@@ -386,12 +386,14 @@ void run() {
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED && !g_pad) {
                 g_pad = SDL_OpenGamepad(e.gdevice.which);
                 if (g_pad) {
-                    bool motion = g_use_gyro && SDL_GamepadHasSensor(g_pad, SDL_SENSOR_GYRO) &&
-                                  SDL_GamepadHasSensor(g_pad, SDL_SENSOR_ACCEL) &&
+                    // whether the controller has motion sensors at all, independent of the gyro setting, so
+                    // turning gyro on later keeps it ahead of the device sensors
+                    g_pad_motion = SDL_GamepadHasSensor(g_pad, SDL_SENSOR_GYRO) &&
+                                   SDL_GamepadHasSensor(g_pad, SDL_SENSOR_ACCEL);
+                    bool motion = g_use_gyro && g_pad_motion &&
                                   SDL_SetGamepadSensorEnabled(g_pad, SDL_SENSOR_GYRO, true) &&
                                   SDL_SetGamepadSensorEnabled(g_pad, SDL_SENSOR_ACCEL, true);
                     input::motion_reset();
-                    g_pad_motion = motion;
                     update_device_motion();
                     touch::set_controller_connected(true);
                     LOG("gamepad: %s%s", SDL_GetGamepadName(g_pad), motion ? " (gyro on)" : "");
