@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <vector>
 
@@ -32,10 +33,94 @@ std::atomic<bool> g_quit{false};
 std::atomic<uint64_t> g_frame{0};
 SDL_Gamepad* g_pad = nullptr;
 bool g_use_gyro = true;  // --no-gyro / settings
+bool g_use_device_gyro = true;  // settings: phone gyro
 bool g_use_rumble = true;
 bool g_background = false;  // iOS app lifecycle
 int g_layout = 0;  // 0: A = right face button (Nintendo positions), 1: A = bottom face button (labels)
 std::atomic<int> g_draw_w{1280}, g_draw_h{720};
+
+// The device's own gyro + accelerometer (iPhone / iPad, through CoreMotion) drive GamePad motion while
+// no controller provides motion sensors: hold the phone like the GamePad to aim with it.
+bool g_pad_motion = false;  // the open controller has gyro + accel (whether or not gyro is on)
+SDL_Sensor* g_dev_gyro = nullptr;
+SDL_Sensor* g_dev_acc = nullptr;
+
+void update_device_motion() {
+    const bool want = g_use_gyro && g_use_device_gyro && !g_pad_motion;
+    if (want == (g_dev_gyro && g_dev_acc)) return;
+    if (g_dev_gyro) SDL_CloseSensor(g_dev_gyro), g_dev_gyro = nullptr;
+    if (g_dev_acc) SDL_CloseSensor(g_dev_acc), g_dev_acc = nullptr;
+    input::motion_reset();
+    if (!want) return;
+    int n = 0;
+    SDL_SensorID* ids = SDL_GetSensors(&n);
+    for (int i = 0; ids && i < n; i++) {
+        SDL_SensorType t = SDL_GetSensorTypeForID(ids[i]);
+        if (t == SDL_SENSOR_GYRO && !g_dev_gyro) g_dev_gyro = SDL_OpenSensor(ids[i]);
+        else if (t == SDL_SENSOR_ACCEL && !g_dev_acc) g_dev_acc = SDL_OpenSensor(ids[i]);
+    }
+    SDL_free(ids);
+    if (!g_dev_gyro || !g_dev_acc) {  // needs both
+        if (g_dev_gyro) SDL_CloseSensor(g_dev_gyro), g_dev_gyro = nullptr;
+        if (g_dev_acc) SDL_CloseSensor(g_dev_acc), g_dev_acc = nullptr;
+        return;
+    }
+    LOG("motion: device gyro + accelerometer");
+}
+
+// Device sensors report in the device body's frame; the GamePad frame is the screen as held (x right,
+// y up, z toward the player), so rotate by a quarter turn in the screen plane. The interface orientation
+// alone is not enough: on a foldable the body frame is turned 90 degrees relative to the screen when it is
+// unfolded, while the reported orientation stays "landscape". So start from the interface orientation,
+// then, once the device is held upright (gravity mostly in the screen plane) for a moment, pick the quarter
+// turn that puts gravity's "up" on +y and keep it until the window or orientation changes again (so
+// steering-wheel tilts during play never flip it).
+int g_rot = 0;            // quarter turns: 0 up = +y, 1 up = +x, 2 up = -x, 3 up = -y (body frame)
+bool g_rot_locked = false;
+int g_rot_upright = 0;    // consecutive upright accelerometer samples
+int g_rot_key[3] = {-1, -1, -1};  // orientation, window w, h the choice was made for
+
+void rotate(int rot, const float in[3], float out[3]) {
+    switch (rot) {
+    case 1: out[0] = -in[1], out[1] = in[0]; break;
+    case 2: out[0] = in[1], out[1] = -in[0]; break;
+    case 3: out[0] = -in[0], out[1] = -in[1]; break;
+    default: out[0] = in[0], out[1] = in[1]; break;
+    }
+    out[2] = in[2];
+}
+
+void device_to_pad(bool accel, const float in[3], float out[3]) {
+    int o = SDL_ORIENTATION_UNKNOWN, w = 0, h = 0;
+    if (g_win) {
+        o = (int)SDL_GetCurrentDisplayOrientation(SDL_GetDisplayForWindow(g_win));
+        SDL_GetWindowSize(g_win, &w, &h);
+    }
+    if (o != g_rot_key[0] || w != g_rot_key[1] || h != g_rot_key[2]) {
+        g_rot_key[0] = o, g_rot_key[1] = w, g_rot_key[2] = h;
+        g_rot = o == SDL_ORIENTATION_LANDSCAPE ? 1 : o == SDL_ORIENTATION_LANDSCAPE_FLIPPED ? 2
+                : o == SDL_ORIENTATION_PORTRAIT_FLIPPED ? 3 : 0;
+        g_rot_locked = false;
+        g_rot_upright = 0;
+    }
+    if (accel && !g_rot_locked) {
+        // SDL reports the reaction to gravity, so (x, y) points to the screen's "up" in the body frame
+        const float x = in[0], y = in[1];
+        if (hypotf(x, y) > 6.0f) {  // within about 40 degrees of upright
+            if (++g_rot_upright >= 30) {
+                int rot = fabsf(y) >= fabsf(x) ? (y > 0 ? 0 : 3) : (x > 0 ? 1 : 2);
+                if (rot != g_rot) input::motion_reset();
+                g_rot = rot;
+                g_rot_locked = true;
+                LOG("motion: device held with %s up (orientation %d, window %dx%d)",
+                    rot == 0 ? "+y" : rot == 1 ? "+x" : rot == 2 ? "-x" : "-y", o, w, h);
+            }
+        } else {
+            g_rot_upright = 0;
+        }
+    }
+    rotate(g_rot, in, out);
+}
 
 // keyboard -> GamePad
 struct KeyMap {
@@ -227,6 +312,12 @@ void set_gyro(bool on) {
         SDL_SetGamepadSensorEnabled(g_pad, SDL_SENSOR_ACCEL, on);
     }
     input::motion_reset();
+    update_device_motion();
+}
+void set_device_gyro(bool on) {
+    if (on == g_use_device_gyro) return;
+    g_use_device_gyro = on;
+    update_device_motion();
 }
 void set_rumble(bool on) {
     g_use_rumble = on;
@@ -255,7 +346,8 @@ void drawable_size(int* w, int* h) {
 }
 
 void create() {
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_EVENTS)) LOG("SDL_Init failed: %s", SDL_GetError());
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_SENSOR | SDL_INIT_EVENTS)) LOG("SDL_Init failed: %s", SDL_GetError());
+    update_device_motion();
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (g_headless) flags |= SDL_WINDOW_HIDDEN;  // tests: render into a hidden window, never on screen
     g_win = SDL_CreateWindow("The Legend of Zelda: Breath of the Wild", 1280, 720, flags);
@@ -294,11 +386,15 @@ void run() {
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED && !g_pad) {
                 g_pad = SDL_OpenGamepad(e.gdevice.which);
                 if (g_pad) {
-                    bool motion = g_use_gyro && SDL_GamepadHasSensor(g_pad, SDL_SENSOR_GYRO) &&
-                                  SDL_GamepadHasSensor(g_pad, SDL_SENSOR_ACCEL) &&
+                    // whether the controller has motion sensors at all, independent of the gyro setting, so
+                    // turning gyro on later keeps it ahead of the device sensors
+                    g_pad_motion = SDL_GamepadHasSensor(g_pad, SDL_SENSOR_GYRO) &&
+                                   SDL_GamepadHasSensor(g_pad, SDL_SENSOR_ACCEL);
+                    bool motion = g_use_gyro && g_pad_motion &&
                                   SDL_SetGamepadSensorEnabled(g_pad, SDL_SENSOR_GYRO, true) &&
                                   SDL_SetGamepadSensorEnabled(g_pad, SDL_SENSOR_ACCEL, true);
                     input::motion_reset();
+                    update_device_motion();
                     touch::set_controller_connected(true);
                     LOG("gamepad: %s%s", SDL_GetGamepadName(g_pad), motion ? " (gyro on)" : "");
                 }
@@ -307,10 +403,18 @@ void run() {
                 SDL_CloseGamepad(g_pad);
                 g_pad = nullptr;
                 input::motion_reset();
+                g_pad_motion = false;
+                update_device_motion();
                 touch::set_controller_connected(false);
             } else if (e.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE && g_pad && e.gsensor.which == SDL_GetGamepadID(g_pad)) {
                 if (e.gsensor.sensor == SDL_SENSOR_GYRO || e.gsensor.sensor == SDL_SENSOR_ACCEL)
                     input::motion_sensor(e.gsensor.sensor == SDL_SENSOR_GYRO, e.gsensor.data, e.gsensor.timestamp);
+            } else if (e.type == SDL_EVENT_SENSOR_UPDATE && g_dev_gyro && g_dev_acc &&
+                       (e.sensor.which == SDL_GetSensorID(g_dev_gyro) || e.sensor.which == SDL_GetSensorID(g_dev_acc))) {
+                const bool gyro = e.sensor.which == SDL_GetSensorID(g_dev_gyro);
+                float d[3];
+                device_to_pad(!gyro, e.sensor.data, d);
+                input::motion_sensor(gyro, d, e.sensor.timestamp);
             } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && g_pad && e.gbutton.which == SDL_GetGamepadID(g_pad)) {
                 auto b = (SDL_GamepadButton)e.gbutton.button;
                 bool both_sticks = (b == SDL_GAMEPAD_BUTTON_LEFT_STICK && SDL_GetGamepadButton(g_pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||

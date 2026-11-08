@@ -14,6 +14,7 @@ void drawable_size(int* w, int* h);
 // Pixel size of the display the window is on (for the automatic render scale).
 void display_pixel_size(int* w, int* h);
 void set_gyro(bool on);  // controller gyro -> GamePad motion (default on)
+void set_device_gyro(bool on);  // the phone's own gyro while no controller has one (default on)
 void set_rumble(bool on);
 void set_layout(int layout);  // 0: A = right face button (Nintendo positions), 1: A = bottom face button
 void set_script(const std::string& s);  // "F:key:NAME,F:hold:NAME:frames,F:stick:l:x:y:frames,F:quit"
