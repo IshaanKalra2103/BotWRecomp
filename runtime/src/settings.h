@@ -15,6 +15,7 @@ struct Settings {
     int display = 0;       // 0 fit (letterbox), 1 stretch, 2 fill (crop)
     int filter = 1;        // output scaling: 0 bilinear, 1 bicubic, 2 hermite, 3 nearest
     bool gyro = true;      // controller gyro -> GamePad motion
+    bool device_gyro = true;  // the phone's own gyro while no controller has one (needs gyro on)
     bool rumble = true;
     int layout = 0;        // 0 Nintendo positions (A = right face button), 1 labels (A = bottom face button)
     bool show_fps = false;

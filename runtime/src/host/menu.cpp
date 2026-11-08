@@ -16,7 +16,11 @@ std::mutex g_lock;
 std::atomic<bool> g_open{false};
 int g_cursor = 0;
 
+#if TARGET_OS_IOS
+enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kDeviceGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kClose, kRows };
+#else
 enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kClose, kRows };
+#endif
 const float kScales[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 2.5f, 3};  // 0 = fit the display
 const char* kDisplays[] = {"Fit 16:9", "Stretch", "Fill (crop)"};
 const char* kFilters[] = {"Bilinear", "Bicubic", "Hermite", "Nearest"};
@@ -42,6 +46,9 @@ void step(Settings& s, int row, int dir) {
         case kDisplay: s.display = wrap(s.display + dir, 3); break;
         case kFilter: s.filter = wrap(s.filter + dir, 4); break;
         case kGyro: s.gyro = !s.gyro; break;
+#if TARGET_OS_IOS
+        case kDeviceGyro: s.device_gyro = !s.device_gyro; break;
+#endif
         case kRumble: s.rumble = !s.rumble; break;
         case kLayout: s.layout = !s.layout; break;
         case kTouch: s.touch = wrap(s.touch + dir, 3), s.touch_hidden = false; break;
@@ -144,6 +151,9 @@ View view() {
     v.rows[kDisplay] = {"Aspect", kDisplays[std::clamp(s.display, 0, 2)]};
     v.rows[kFilter] = {"Upscale filter", kFilters[std::clamp(s.filter, 0, 3)]};
     v.rows[kGyro] = {"Gyro aiming", s.gyro ? "On" : "Off"};
+#if TARGET_OS_IOS
+    v.rows[kDeviceGyro] = {"Phone gyro", s.gyro && s.device_gyro ? "On" : "Off"};
+#endif
     v.rows[kRumble] = {"Rumble", s.rumble ? "On" : "Off"};
     v.rows[kLayout] = {"Buttons", s.layout ? "A = bottom (Cross / Xbox A)" : "A = right (Circle / Xbox B)"};
     v.rows[kTouch] = {"Touch controls", s.touch == 1 ? "On" : s.touch == 2 ? "Off" : "Auto (no controller)"};
