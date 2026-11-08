@@ -65,8 +65,20 @@ BOTW_HOOK(0x03793378) {
     if (fps60()) c->f[0] = g_delta;
 }
 // VFR delta when the interval did not change: lfs f0, 28(r30) (cached value)
+// The game only recomputes the delta when its own interval changes, and that stays 2 vblanks, so after
+// switching 60 -> 30 fps in the settings menu the cached 60 fps delta would stick (half speed): restore
+// the 30 fps value (interval 2 / base 2 = 1.0) once.
+static bool g_delta_cached = false;
 BOTW_HOOK(0x0379339c) {
-    if (!fps60()) return;
+    if (!fps60()) {
+        if (g_delta_cached) {
+            g_delta_cached = false;
+            c->f[0] = 1.0;
+            mem::wf32(c->r[30] + 28, 1.0f);
+        }
+        return;
+    }
+    g_delta_cached = true;
     c->f[0] = g_delta;
     mem::wf32(c->r[30] + 28, g_delta);
 }
