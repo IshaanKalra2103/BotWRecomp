@@ -60,6 +60,10 @@ HLE_EXPORT(vpad, VPADRead) {
         wf(buf + 0x7C, 1.0f);
         wf(buf + 0x8C, 1.0f);
     }
+    // touch panel (tpNormal 0x52, tpFiltered1 0x5A, tpFiltered2 0x62: x, y, touch, validity): not touched,
+    // position invalid (VPAD_INVALID_X | VPAD_INVALID_Y), as Cemu reports it. Zero would mean a valid
+    // pointer at (0, 0).
+    for (uint32_t tp : {0x52u, 0x5Au, 0x62u}) mem::w16(buf + tp + 6, 3);
     mem::w8(buf + 0xA0, 0x40);  // slide volume
     mem::w8(buf + 0xA1, 6);     // battery full
     if (err) mem::w32(err, 0);
